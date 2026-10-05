@@ -16,14 +16,20 @@ channel (backtest venue, paper broker, live broker gateway) on top of
   re-submitting the same key returns the same `OrderId`; re-using a key for
   a different intent is a rejected conflict. Retries and replays never
   produce duplicate orders at the venue.
+- **BacktestVenue (training channel)** — an event-driven, bar-level
+  matching engine implementing the full `ExecutionPort` contract: A-share
+  fillability rules (price-limit bands, sealed one-line boards,
+  suspensions, volume participation caps, strict boundary mode),
+  configurable fee and slippage models, and a cash account with T+1
+  sellable positions.
 
 ## Scope
 
-- **Semantics and validation only.** Concrete venues/brokers/gateways
-  (backtest matcher, paper broker, miniQMT live gateway, reconciliation)
-  are delivered in later milestones.
+- **Backtest venue delivered; paper broker and live gateways** (paper
+  ledger, miniQMT live gateway, reconciliation) arrive in later
+  milestones.
 - Depends only on `pulsar-contracts` (pinned git reference). No channel
-  SDK, no I/O, no configuration handling.
+  SDK, no I/O beyond injected bars, no credentials.
 
 ## Installation
 
@@ -36,6 +42,8 @@ pip install -e .[dev]
 Python >= 3.11.
 
 ## Usage
+
+### Order semantics
 
 ```python
 from datetime import datetime
@@ -85,6 +93,65 @@ Any transition outside the whitelist raises `IllegalOrderTransitionError`
 (or its `EventStateMismatchError` subtype when driven by an event), and
 fill events that would overfill an order, complete it as a `PARTIAL_FILL`,
 or stop short of completion as a `FILL` raise `FillConsistencyError`.
+
+### Backtest venue
+
+```python
+from datetime import date, datetime
+
+from pulsar_contracts import (
+    Board, Exchange, Freq, IdempotencyKey, Instrument,
+    OrderIntent, PriceMode, Side,
+)
+from pulsar_exec import BacktestVenue, SlippageModel
+
+instrument = Instrument(symbol="600519", exchange=Exchange.SSE,
+                        board=Board.MAIN, list_date=date(2001, 8, 27))
+venue = BacktestVenue(
+    initial_cash=1_000_000.0,
+    instruments=[instrument],
+    slippage=SlippageModel(fixed_bps=5.0),   # conservative default
+    clock=datetime(2026, 10, 5, 9, 30),
+)
+venue.on_event(lambda event: print(event.event_type, event.fill or event.reason))
+
+order_id = venue.submit(OrderIntent(
+    idempotency_key=IdempotencyKey(run_id="run-42", seq=1),
+    side=Side.BUY, symbol="600519", quantity=1000,
+    price_mode=PriceMode.LIMIT, limit_price=1800.0,
+))
+
+for bar in historical_bars:        # replay loop feeds the venue
+    venue.on_bar(bar)
+venue.on_session_end(date(2026, 10, 5))   # expire DAY orders, roll T+1
+
+print(venue.query(order_id), venue.positions(), venue.cash)
+```
+
+**Fillability.** Limit orders fill when the bar's low (high, for sells)
+touches or crosses the limit — strict penetration required in strict
+mode — at the better of open and limit; marketable intents
+(counter-price / five-level-IOC) fill at the bar close, the IOC
+cancelling its remainder on the same bar. Orders collectively consume at
+most `max_volume_fraction` (default 10%) of a bar's volume. Sealed
+one-line limit boards (一字板) and suspended symbols never fill.
+
+**A-share rules.** Buys must be whole 100-share lots; odd lots sell only
+as a one-shot sale of the whole available position; shares bought today
+are not sellable until the trading day rolls (T+1); limit prices outside
+the day's band (main ±10%, GEM/STAR ±20%, ST ±5%) are rejected.
+
+**Fees & slippage (all configuration with policy defaults).**
+
+| Component | Default | Direction |
+|-|-|-|
+| commission | 0.0003, min 5.00 CNY per trade | buy + sell |
+| stamp duty | 0.0005 | sell only |
+| transfer fee | 0.00001 | buy + sell |
+| slippage | 5 bps fixed + optional volume-impact term | against you |
+
+Fees are booked per fill in exact decimal arithmetic, rounded to the cent
+(ROUND_HALF_UP), and carried on the `Fill` payload.
 
 ## State machine
 
