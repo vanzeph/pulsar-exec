@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  exec:
+    name: typecheck + purity + tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package with dev tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[dev]
+
+      - name: Typecheck (mypy strict)
+        run: python -m mypy
+
+      - name: Import purity check (runtime)
+        run: |
+          python - <<'PY'
+          import sys
+
+          import pulsar_exec
+
+          forbidden = {
+              "akshare", "baostock", "tushare", "rqdatac", "rqdata", "jqdatasdk",
+              "mootdx",
+              "pulsar_core", "pulsar_data", "pulsar_app", "pulsar_ui",
+          }
+          loaded = forbidden.intersection(sys.modules)
+          assert not loaded, f"forbidden modules imported by pulsar-exec: {sorted(loaded)}"
+          print(f"import purity OK (pulsar-exec {pulsar_exec.__version__})")
+          PY
+
+      - name: Tests (pytest)
+        run: python -m pytest
+
+  install:
+    name: pip installability smoke check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install from source (non-editable)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
+
+      - name: Smoke import of the public surface
+        run: |
+          python -c "import pulsar_exec as pexec; \
+                     assert pexec.ExecutionStateError and pexec.IdempotencyManager; \
+                     print('install ok', pexec.__version__)"
+
+  topology-gate:
+    name: cross-repo topology gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch topology gate tool (versioned reference)
+        run: |
+          git clone --quiet https://github.com/vanzeph/pulsar-contracts.git /tmp/pulsar-contracts
+          git -C /tmp/pulsar-contracts checkout --quiet 4178b2ee27757b858922d26b7e1a532acf953e7e
+
+      - name: Topology check (pulsar-exec)
+        run: python /tmp/pulsar-contracts/tools/check_topology.py --repo "$GITHUB_WORKSPACE"
