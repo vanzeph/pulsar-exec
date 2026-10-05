@@ -31,6 +31,13 @@ dev = [
     "pytest>=8",
     "mypy>=1.8",
 ]
+# The miniQMT terminal SDK; only needed to open a real live session
+# (tests run against the local protocol stubs).  Ships with the broker's
+# miniQMT client - install manually from the terminal distribution when
+# the simulation/live drill runs on a terminal-equipped machine.
+live = [
+    "xtquant",
+]
 
 [project.urls]
 Repository = "https://github.com/vanzeph/pulsar-exec"

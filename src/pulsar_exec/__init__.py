@@ -26,9 +26,14 @@ This package implements the execution-side semantics that every channel
   positions;
 * :mod:`pulsar_exec.venue` — :class:`BacktestVenue`, the event-driven
   bar-level matching engine implementing
-  :class:`~pulsar_contracts.execution.ExecutionPort` for training runs.
+  :class:`~pulsar_contracts.execution.ExecutionPort` for training runs;
+* :mod:`pulsar_exec.live` — the live miniQMT channel:
+  :class:`~pulsar_exec.live.MiniQMTGateway` (protocol/stub adapter over
+  ``xtquant``), :class:`~pulsar_exec.live.LiveGate` (unlock env + caps +
+  rejection trail), reconciliation reports,
+  :func:`~pulsar_exec.live.safe_shutdown` and the JSONL event archive.
 
-Paper broker and live broker gateways arrive in later deliveries.
+Paper broker arrives in a later delivery.
 """
 
 from __future__ import annotations
@@ -66,6 +71,18 @@ from .state_machine import (
     validate_event_for_order,
 )
 from .venue import DEFAULT_INSTRUMENT, BacktestVenue
+from .live import (  # noqa: E402  (live channel re-exported for convenience)
+    BrokerSession,
+    EventArchive,
+    GatewayState,
+    LiveGate,
+    LiveGateConfig,
+    MiniQMTGateway,
+    ReconciliationReport,
+    Reconciler,
+    ShutdownManifest,
+    safe_shutdown,
+)
 
 try:
     __version__ = version("pulsar-exec")
@@ -116,4 +133,15 @@ __all__ = [
     # venue
     "BacktestVenue",
     "DEFAULT_INSTRUMENT",
+    # live channel
+    "MiniQMTGateway",
+    "GatewayState",
+    "LiveGate",
+    "LiveGateConfig",
+    "BrokerSession",
+    "Reconciler",
+    "ReconciliationReport",
+    "ShutdownManifest",
+    "safe_shutdown",
+    "EventArchive",
 ]

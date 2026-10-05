@@ -22,14 +22,28 @@ channel (backtest venue, paper broker, live broker gateway) on top of
   suspensions, volume participation caps, strict boundary mode),
   configurable fee and slippage models, and a cash account with T+1
   sellable positions.
+- **Live channel (miniQMT first delivery)** — `MiniQMTGateway`, a live
+  `ExecutionPort` implementation against a local `BrokerSession`
+  protocol/stub (the real `xtquant` SDK is referenced only by a dynamic,
+  terminal-bound bridge); `LiveGate` (unlock environment variable,
+  per-order and daily value caps, append-only rejection trail);
+  reconciliation (post-market report + reconnect converge-first resume
+  with a read-only alert on differences); `safe_shutdown` (cancel active
+  orders, refuse new intents, persist the shutdown manifest); and a JSONL
+  event archive for audit.
 
 ## Scope
 
-- **Backtest venue delivered; paper broker and live gateways** (paper
-  ledger, miniQMT live gateway, reconciliation) arrive in later
-  milestones.
+- **Backtest venue and the live channel delivered; the paper broker**
+  arrives in a later milestone.
+- The live channel's broker-facing behaviour is fully unit-tested against
+  the in-memory protocol fake. The broker simulation drill
+  (buy/sell/cancel/reconcile round trip on a miniQMT terminal) requires
+  the terminal and a simulation account and is executed on
+  terminal-equipped machines — see *Live gateway* below.
 - Depends only on `pulsar-contracts` (pinned git reference). No channel
-  SDK, no I/O beyond injected bars, no credentials.
+  SDK import at module load, no I/O beyond injected sessions, no
+  credentials in source (environment variable names only).
 
 ## Installation
 
@@ -152,6 +166,66 @@ the day's band (main ±10%, GEM/STAR ±20%, ST ±5%) are rejected.
 
 Fees are booked per fill in exact decimal arithmetic, rounded to the cent
 (ROUND_HALF_UP), and carried on the `Fill` payload.
+
+### Live gateway (miniQMT)
+
+```python
+from pulsar_exec import LiveGate, LiveGateConfig, MiniQMTGateway, safe_shutdown
+from pulsar_exec.live import run_post_market_reconciliation
+from pulsar_exec.live.xt_bridge import open_broker_session
+
+session = open_broker_session()   # reads PULSAR_MINIQMT_ACCOUNT_ID etc.
+gateway = MiniQMTGateway(
+    session=session,
+    gate=LiveGate(LiveGateConfig(
+        unlock_env="PULSAR_LIVE_CONFIRM",   # live stays locked without it
+        max_order_value=50_000.0,           # per-order cap (CNY)
+        max_daily_traded_value=500_000.0,   # daily cumulative cap (CNY)
+    )),
+    run_id="run-live-0001",
+)
+gateway.on_event(lambda event: print(event.event_type, event.fill or event.reason))
+gateway.start()
+
+order_id = gateway.submit(intent)   # refused unless unlocked and within caps
+...
+report = run_post_market_reconciliation(gateway, "reports/eod.json")
+manifest = safe_shutdown(gateway, reason="session end",
+                         manifest_dir="runs/run-live-0001/")
+```
+
+**Gate (实盘门禁).** Live is locked by default: the unlock environment
+variable must be explicitly set (optionally to a pinned token) before any
+order reaches the broker. Each intent's notional
+(`reference price x quantity`) must fit the per-order cap and the daily
+cumulative traded-value budget; violations — plus a halted gate, or an
+intent that cannot be priced — are refused with a `REJECTED` event and an
+append-only JSONL rejection trail (`LiveGate.write_rejection_log`).
+
+**Unconfirmed outcomes.** A submission or cancellation that cannot be
+confirmed (session down) emits `ERROR`, leaves the order state untouched
+and converges via `poll()`/reconciliation; it is never assumed failed and
+re-sent.
+
+**Reconciliation (对账).** `gateway.reconcile()` first converges the local
+book onto broker truth (fills that happened while disconnected), then
+diffs orders, trades, positions and (optionally) cash. Any difference
+produces a report entry, keeps the gateway in a read-only alert that
+refuses new intents, and blocks the next Live start until an operator
+acknowledges (`gateway.acknowledge_alert(note)`). On reconnect the same
+machinery runs *before* the gateway resumes accepting intents.
+
+**Safe shutdown (安全停机).** `safe_shutdown` halts new intents, cancels
+every active order (recording — never assuming — unconfirmed cancels),
+converges via reconciliation when the session allows, disconnects and
+writes a JSON manifest of the final state.
+
+**Environment variables** (names only ever appear in source):
+`PULSAR_LIVE_CONFIRM` (gate unlock), `PULSAR_MINIQMT_ACCOUNT_ID`,
+`PULSAR_MINIQMT_USERDATA`, `PULSAR_MINIQMT_SESSION_ID` (bridge). The
+`xtquant` SDK is an optional dependency (`pip install .[live]`) — it
+ships with the miniQMT terminal and is loaded dynamically by the bridge,
+so everything else works (and tests run) without it.
 
 ## State machine
 
