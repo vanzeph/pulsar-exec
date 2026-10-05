@@ -22,6 +22,10 @@ channel (backtest venue, paper broker, live broker gateway) on top of
   suspensions, volume participation caps, strict boundary mode),
   configurable fee and slippage models, and a cash account with T+1
   sellable positions.
+- **PaperBroker (paper channel)** — the realtime simulation venue:
+  snapshot-driven strict book matching over the very same account,
+  pre-trade validation and order state machine as the backtest venue,
+  with session lifecycle (`start`/`stop`) and an auditable event trail.
 - **Live channel (miniQMT first delivery)** — `MiniQMTGateway`, a live
   `ExecutionPort` implementation against a local `BrokerSession`
   protocol/stub (the real `xtquant` SDK is referenced only by a dynamic,
@@ -34,8 +38,8 @@ channel (backtest venue, paper broker, live broker gateway) on top of
 
 ## Scope
 
-- **Backtest venue and the live channel delivered; the paper broker**
-  arrives in a later milestone.
+- All three channels are delivered: backtest venue (E2), paper broker
+  (E3) and the live channel (E4).
 - The live channel's broker-facing behaviour is fully unit-tested against
   the in-memory protocol fake. The broker simulation drill
   (buy/sell/cancel/reconcile round trip on a miniQMT terminal) requires
@@ -166,6 +170,75 @@ the day's band (main ±10%, GEM/STAR ±20%, ST ±5%) are rejected.
 
 Fees are booked per fill in exact decimal arithmetic, rounded to the cent
 (ROUND_HALF_UP), and carried on the `Fill` payload.
+
+### Paper broker (模拟盘)
+
+```python
+from datetime import date, datetime
+
+from pulsar_contracts import (
+    Board, Exchange, IdempotencyKey, Instrument, OrderIntent,
+    PriceMode, Side, Snapshot, QuoteLevel,
+)
+from pulsar_exec import EventArchive, MatchingRules, PaperBroker
+
+instrument = Instrument(symbol="600519", exchange=Exchange.SSE,
+                        board=Board.MAIN, list_date=date(2001, 8, 27))
+broker = PaperBroker(
+    initial_cash=1_000_000.0,
+    matching=MatchingRules(strict_price_boundary=True),  # paper is strict
+    instruments=[instrument],
+    clock=datetime(2026, 10, 5, 9, 25),
+    archive=EventArchive("runs/run-paper-0001"),          # 事件留痕 (JSONL)
+)
+broker.on_event(lambda event: print(event.event_type, event.fill or event.reason))
+broker.start(now=datetime(2026, 10, 5, 9, 25))
+broker.set_previous_close("600519", 10.00)   # yesterday's close drives bands
+
+order_id = broker.submit(OrderIntent(
+    idempotency_key=IdempotencyKey(run_id="run-paper-0001", seq=1),
+    side=Side.BUY, symbol="600519", quantity=1000,
+    price_mode=PriceMode.LIMIT, limit_price=10.00,
+))
+
+# the upper layer pumps the realtime stream into the broker
+def on_snapshot(snapshot: Snapshot) -> None:
+    broker.on_snapshot(snapshot)
+
+market_data_port.subscribe(["600519"], on_snapshot)
+
+broker.on_session_end(date(2026, 10, 5))  # expire DAY orders, roll T+1
+broker.stop("session end")                # cancels actives, closes the trail
+print(broker.query(order_id), broker.positions(), broker.cash)
+```
+
+**Matching (严格模式).** A limit buy fills only against ask levels
+*strictly cheaper* than the limit (the book must penetrate the limit),
+a limit sell only against bid levels *strictly dearer*; fills happen at
+the displayed level prices, so a penetrating book yields price
+improvement, and one snapshot produces at most one blended
+(volume-weighted) fill event per order. Counter-price intents take the
+best counter level per snapshot; five-level-IOC sweeps the displayed
+levels and cancels the remainder on the same snapshot (即成剩撤). Sealed
+one-line boards (一字板, detected with the same rule as the backtest via
+a bar synthesized from the snapshot) and suspensions never fill.
+
+**Shared semantics.** The paper ledger *is* the backtest's
+`BacktestAccount` (cash / positions / T+1 availability, per-fill fees),
+pre-trade validation (board lots, funding, T+1, odd-lot one-shot sells,
+price-limit bands) and the order state machine are the very same
+implementations — the acceptance test asserts that the same intent
+sequence drives identical event/status sequences on `BacktestVenue` and
+`PaperBroker`. No synthetic slippage is applied: the displayed book is
+the reality a paper run validates against.
+
+**Session lifecycle & snapshots.** Intents are accepted only between
+`start()` and `stop()` (stopping cancels every active order). Snapshots
+are best effort: a `seq` that does not advance over the last seen one
+(late or duplicated delivery) is dropped silently and gaps are
+tolerated — matching keeps converging on the freshest book. Every event
+is archived (JSONL) before callbacks see it; the session lifecycle is
+recorded in an inspectable `session_trail()`.
 
 ### Live gateway (miniQMT)
 

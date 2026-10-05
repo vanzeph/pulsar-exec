@@ -63,7 +63,6 @@ from pulsar_contracts import (
     ExecutionPort,
     Fill,
     Instrument,
-    InstrumentStatus,
     Order,
     OrderId,
     OrderIntent,
@@ -79,9 +78,10 @@ from .account import BacktestAccount
 from .config import FeeSchedule, MatchingRules, SlippageModel
 from .fees import compute_fees
 from .idempotency import IdempotencyManager
-from .price_limit import is_one_line_board, limit_prices
+from .price_limit import is_one_line_board
 from .slippage import apply_slippage
 from .state_machine import advance_order
+from .validation import affordable_quantity, validate_intent
 
 __all__ = ["BacktestVenue", "DEFAULT_INSTRUMENT"]
 
@@ -360,65 +360,21 @@ class BacktestVenue(ExecutionPort):  # type: ignore[misc]  # contracts lack py.t
         return self._clock
 
     def _validate_intent(self, intent: OrderIntent) -> str | None:
-        """Venue-side pre-trade validation; ``None`` means accepted."""
-        instrument = self._instrument(intent.symbol)
-        if instrument.status is InstrumentStatus.SUSPENDED:
-            return f"{intent.symbol} is suspended (停牌)"
+        """Venue-side pre-trade validation; ``None`` means accepted.
 
-        if intent.side is Side.BUY:
-            lot = self._matching.lot_size
-            if intent.quantity % lot != 0:
-                return (
-                    f"buy quantity {intent.quantity} is not a multiple of the "
-                    f"{lot}-share board lot"
-                )
-            reference = self._reference_price(intent)
-            if reference is None:
-                return (
-                    "cannot estimate funds: no limit price and no market price "
-                    "seen for this symbol yet"
-                )
-            estimate = compute_fees(
-                price=reference,
-                quantity=intent.quantity,
-                side=Side.BUY,
-                schedule=self._fees,
-            )
-            cost = round(reference * intent.quantity + estimate.total, 2)
-            if cost > self._account.cash + 0.005:
-                return (
-                    f"insufficient funds: estimated cost {cost:.2f} exceeds "
-                    f"cash {self._account.cash:.2f}"
-                )
-        else:
-            available = self._account.available_quantity(intent.symbol)
-            if intent.quantity > available:
-                return (
-                    f"sell quantity {intent.quantity} exceeds T+1 available "
-                    f"{available} of {intent.symbol}"
-                )
-            lot = self._matching.lot_size
-            if available % lot != 0 and intent.quantity != available:
-                return (
-                    f"odd-lot position of {available} shares must be sold in "
-                    "one shot (零股一次性卖出)"
-                )
-
-        if intent.price_mode is PriceMode.LIMIT:
-            prev_close = self._prev_close.get(intent.symbol)
-            if prev_close is not None:
-                limit_up, limit_down = limit_prices(
-                    prev_close,
-                    board=instrument.board,
-                    is_st=instrument.is_st,
-                    rules=self._matching,
-                )
-                if not (limit_down - 0.005 <= intent.limit_price <= limit_up + 0.005):
-                    return (
-                        f"limit price {intent.limit_price:.2f} outside the day's "
-                        f"price-limit band [{limit_down:.2f}, {limit_up:.2f}]"
-                    )
-        return None
+        Delegates to the channel-agnostic
+        :func:`~pulsar_exec.validation.validate_intent` shared with the
+        paper broker, so both channels reject and accept the same intents.
+        """
+        return validate_intent(
+            intent,
+            account=self._account,
+            instrument=self._instrument(intent.symbol),
+            matching=self._matching,
+            fees=self._fees,
+            reference_price=self._reference_price(intent),
+            prev_close=self._prev_close.get(intent.symbol),
+        )
 
     def _reference_price(self, intent: OrderIntent) -> float | None:
         """Price used for the funds estimate of a marketable buy."""
@@ -454,30 +410,10 @@ class BacktestVenue(ExecutionPort):  # type: ignore[misc]  # contracts lack py.t
     def _affordable(self, price: float, desired: int) -> int:
         """Largest quantity ≤ ``desired`` payable with current cash.
 
-        Accounts for the commission minimum via the actual fee function;
-        the analytic starting point leaves at most a couple of correction
-        steps, so the decrement loop is bounded and tiny.
+        Delegates to the shared, fee-aware
+        :func:`~pulsar_exec.validation.affordable_quantity`.
         """
-        schedule = self._fees
-        combined = schedule.commission_rate + schedule.transfer_fee_rate
-
-        def cost(qty: int) -> float:
-            fees = compute_fees(
-                price=price, quantity=qty, side=Side.BUY, schedule=schedule
-            )
-            return round(price * qty + fees.total, 2)
-
-        candidate = int(self._account.cash / (price * (1 + combined)))
-        if schedule.min_commission > 0:
-            by_minimum = int(
-                (self._account.cash - schedule.min_commission)
-                / (price * (1 + schedule.transfer_fee_rate))
-            )
-            candidate = max(candidate, by_minimum)
-        qty = max(0, min(desired, candidate))
-        while qty > 0 and cost(qty) > self._account.cash + 0.005:
-            qty -= 1
-        return qty
+        return affordable_quantity(self._account.cash, price, desired, self._fees)
 
     def _execute(self, order: Order, fill_price: float, quantity: int, bar: Bar) -> None:
         """Execute ``quantity`` shares of ``order`` at ``fill_price``.

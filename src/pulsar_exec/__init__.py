@@ -27,13 +27,15 @@ This package implements the execution-side semantics that every channel
 * :mod:`pulsar_exec.venue` — :class:`BacktestVenue`, the event-driven
   bar-level matching engine implementing
   :class:`~pulsar_contracts.execution.ExecutionPort` for training runs;
+* :mod:`pulsar_exec.paper` — :class:`PaperBroker`, the realtime
+  snapshot-driven paper channel (严格模式 book matching over the shared
+  account, pre-trade validation and state machine; local ledger, no real
+  money);
 * :mod:`pulsar_exec.live` — the live miniQMT channel:
   :class:`~pulsar_exec.live.MiniQMTGateway` (protocol/stub adapter over
   ``xtquant``), :class:`~pulsar_exec.live.LiveGate` (unlock env + caps +
   rejection trail), reconciliation reports,
   :func:`~pulsar_exec.live.safe_shutdown` and the JSONL event archive.
-
-Paper broker arrives in a later delivery.
 """
 
 from __future__ import annotations
@@ -71,6 +73,12 @@ from .state_machine import (
     validate_event_for_order,
 )
 from .venue import DEFAULT_INSTRUMENT, BacktestVenue
+from .paper import (  # noqa: E402  (paper channel re-exported for convenience)
+    DEFAULT_INSTRUMENT as PAPER_DEFAULT_INSTRUMENT,
+    PaperBroker,
+    PaperSessionRecord,
+    PaperSessionState,
+)
 from .live import (  # noqa: E402  (live channel re-exported for convenience)
     BrokerSession,
     EventArchive,
@@ -133,6 +141,10 @@ __all__ = [
     # venue
     "BacktestVenue",
     "DEFAULT_INSTRUMENT",
+    # paper channel
+    "PaperBroker",
+    "PaperSessionState",
+    "PaperSessionRecord",
     # live channel
     "MiniQMTGateway",
     "GatewayState",
