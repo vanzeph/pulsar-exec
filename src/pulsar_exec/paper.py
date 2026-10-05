@@ -549,10 +549,14 @@ class PaperBroker(ExecutionPort):  # type: ignore[misc]  # contracts lack py.typ
         levels = asks if self._orders[order_id].side is Side.BUY else bids
         tranches: list[tuple[float, int]] = []
         committed = 0.0  # value already swept by earlier tranches
+        swept = 0  # shares already swept by earlier tranches of this sweep
 
         for index, level in enumerate(levels[:_MAX_LEVELS]):
             order = self._orders[order_id]
-            remaining = order.quantity - order.filled_quantity
+            # the sweep coalesces into one fill applied only after the loop,
+            # so filled_quantity cannot grow mid-sweep; the tranche budget
+            # must track what earlier levels of THIS sweep already took
+            remaining = order.quantity - order.filled_quantity - swept
             if remaining <= 0:
                 break
             price, volume = level[0], level[1]
@@ -583,6 +587,7 @@ class PaperBroker(ExecutionPort):  # type: ignore[misc]  # contracts lack py.typ
 
             tranches.append((price, take))
             committed += price * take
+            swept += take
             level[1] -= take
 
         if tranches:

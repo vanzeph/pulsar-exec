@@ -308,6 +308,38 @@ class TestLevelSweep:
             (300 * 9.98 + 700 * 9.96) / 1000
         )
 
+    def test_deep_book_never_overfills_the_order(self):
+        """Regression: the sweep budget must span the whole sweep.
+
+        ``_match_order`` coalesces its tranches into one fill applied only
+        after the level loop, so the order's ``filled_quantity`` cannot
+        grow mid-sweep. A book whose *every* level could absorb the full
+        remaining quantity (deep displayed liquidity) must still fill
+        exactly the order quantity — never one full tranche per level.
+        """
+        broker = make_broker()
+        recorder = Recorder(broker)
+        order_id = broker.submit(intent(1, Side.BUY, 200, 10.50))
+
+        broker.on_snapshot(
+            snap(
+                1,
+                0,
+                10.00,
+                asks=((10.00, 100_000), (10.01, 100_000), (10.02, 100_000)),
+            )
+        )
+
+        assert broker.query(order_id).status.value == "filled"
+        assert broker.query(order_id).filled_quantity == 200
+        assert recorder.types_of(order_id) == [
+            ExecutionEventType.ACCEPTED,
+            ExecutionEventType.FILL,
+        ]
+        fills = recorder.fills(order_id)
+        assert [fill.quantity for fill in fills] == [200]
+        assert fills[0].price == pytest.approx(10.00)  # best level only
+
     def test_orders_share_the_displayed_liquidity_fifo(self):
         broker = make_broker()
         first = broker.submit(intent(1, Side.BUY, 500, 10.00))
