@@ -12,6 +12,13 @@ design mandates:
   rejected loudly instead of silently re-pointing the key;
 * different keys map to different order ids.
 
+Order-id assignment is **deterministic by default**: the id is the SHA-256
+digest of the wire-form idempotency key (``ord-<first 32 hex>``), so a
+rerun of the same run manifest reproduces byte-identical order trails —
+the core-engine reproducibility promise covers 成交明细, and event
+archives key fills by order id. Channels that prefer exchange-assigned
+or random ids (the live gateway) inject their own factory.
+
 Venues/gateways consult the manager *before* forwarding anything to the
 matching engine or broker session, which is what makes ``submit``
 idempotent end to end.
@@ -22,6 +29,7 @@ from __future__ import annotations
 import threading
 import uuid
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Callable
 
 from pulsar_contracts import (
@@ -35,6 +43,7 @@ __all__ = [
     "SubmitRegistration",
     "IdempotencyManager",
     "default_order_id_factory",
+    "deterministic_order_id",
 ]
 
 
@@ -66,8 +75,23 @@ class SubmitRegistration:
     created: bool
 
 
+def deterministic_order_id(wire_key: str) -> OrderId:
+    """Derive the default order id from an idempotency key's wire form.
+
+    ``ord-<32 hex>`` — the same shape the historical uuid4-based ids had,
+    but a pure function of the key: reruns of the same manifest rebuild
+    the same ids, keeping event journals and fill blotters bit-identical.
+    """
+    return OrderId(f"ord-{sha256(wire_key.encode('utf-8')).hexdigest()[:32]}")
+
+
 def default_order_id_factory() -> OrderId:
-    """Generate a fresh venue-style order id (used unless one is injected)."""
+    """Generate a fresh random venue-style order id.
+
+    Opt-in for channels that do not want key-derived ids (e.g. a live
+    gateway mirroring broker-assigned identifiers); the backtest venue
+    and paper broker use :func:`deterministic_order_id` instead.
+    """
     return OrderId(f"ord-{uuid.uuid4().hex}")
 
 
@@ -75,11 +99,13 @@ class IdempotencyManager:
     """Registry mapping idempotency keys to exactly one order id each.
 
     Thread-safe: gateway retry paths and reconciliation loops may hit the
-    registry concurrently.
+    registry concurrently. Without an injected ``order_id_factory`` the
+    binding derives deterministically from the key (see
+    :func:`deterministic_order_id`).
     """
 
     def __init__(
-        self, order_id_factory: Callable[[], OrderId] = default_order_id_factory
+        self, order_id_factory: "Callable[[], OrderId] | None" = None
     ) -> None:
         self._order_id_factory = order_id_factory
         self._lock = threading.Lock()
@@ -90,10 +116,10 @@ class IdempotencyManager:
         """Register ``intent``; idempotent on its key.
 
         Returns the :class:`SubmitRegistration` carrying the order id. The
-        first registration of a key creates a fresh order id; re-submitting
-        an identical intent returns the same order id with ``created=False``;
-        re-using the key for a different intent raises
-        :class:`IdempotencyConflictError`.
+        first registration of a key assigns its order id (key-derived by
+        default); re-submitting an identical intent returns the same order
+        id with ``created=False``; re-using the key for a different intent
+        raises :class:`IdempotencyConflictError`.
         """
         wire_key = intent.idempotency_key.to_str()
         with self._lock:
@@ -104,7 +130,11 @@ class IdempotencyManager:
                         intent.idempotency_key, existing, intent
                     )
                 return SubmitRegistration(self._order_ids[wire_key], created=False)
-            order_id = self._order_id_factory()
+            order_id = (
+                self._order_id_factory()
+                if self._order_id_factory is not None
+                else deterministic_order_id(wire_key)
+            )
             self._bindings[wire_key] = intent
             self._order_ids[wire_key] = order_id
             return SubmitRegistration(order_id, created=True)

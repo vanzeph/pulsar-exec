@@ -133,6 +133,24 @@ class TestOrderIdFactory:
         assert first.order_id == OrderId("ord-1")
         assert second.order_id == OrderId("ord-2")
 
+    def test_default_binding_is_deterministic_across_managers(self):
+        """Reruns rebuild identical order ids from the same idempotency key.
+
+        The core-engine reproducibility promise (same manifest -> identical
+        成交明细) extends to the event trail, and events key their fills by
+        order id: two fresh managers must therefore assign the exact same
+        id to the same key — no uuid4 drift between runs.
+        """
+        first = IdempotencyManager().register(make_intent(run_id="run-r", seq=3))
+        second = IdempotencyManager().register(make_intent(run_id="run-r", seq=3))
+        assert first.order_id == second.order_id
+
+    def test_deterministic_ids_keep_shape_and_separate_keys(self):
+        one = IdempotencyManager().register(make_intent(run_id="run-r", seq=1))
+        other = IdempotencyManager().register(make_intent(run_id="run-r", seq=2))
+        assert one.order_id.startswith("ord-") and len(one.order_id) == 36
+        assert one.order_id != other.order_id
+
 
 class TestConcurrency:
     def test_concurrent_identical_submissions_yield_single_order(self):
