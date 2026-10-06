@@ -11,7 +11,7 @@ license = { text = "MIT" }
 authors = [{ name = "vanzeph" }]
 requires-python = ">=3.11"
 dependencies = [
-    "pulsar-contracts @ git+https://github.com/vanzeph/pulsar-contracts.git@f385fbd",
+    "pulsar-contracts @ git+https://github.com/vanzeph/pulsar-contracts.git@2e3e393",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -59,7 +59,7 @@ strict = true
 plugins = ["pydantic.mypy"]
 files = ["src"]
 
-# pulsar-contracts (f385fbd) does not yet ship a py.typed marker; drop the
+# pulsar-contracts (2e3e393) does not yet ship a py.typed marker; drop the
 # marker upstream and this override can go away.
 [[tool.mypy.overrides]]
 module = "pulsar_contracts.*"
